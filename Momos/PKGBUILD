@@ -11,9 +11,9 @@ source=("momo.py")
 sha256sums=('SKIP') # قم بتغييرها لاحقًا إذا أردت التحقق من الملف
 
 package() {
-    # إنشاء المجلد الرئيسي للبرنامج
+    # تثبيت البرنامج في /usr/local/bin
     install -Dm755 "${srcdir}/momo.py" "${pkgdir}/usr/local/bin/momo"
 
-    # إنشاء مجلد Logs
+    # إنشاء مجلد Logs داخل المنزل
     mkdir -p "${pkgdir}/home/${USER}/.momo/logs"
 }
