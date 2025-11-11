@@ -7,13 +7,13 @@ arch=('x86_64')
 url="https://github.com/helwan-linux/momo"
 license=('GPL')
 depends=('python' 'python-curses' 'lm_sensors' 'smartmontools' 'hdparm' 'nvme-cli' 'stress-ng' 'memtester' 'sysbench')
-source=("momo.py")
-sha256sums=('SKIP') # قم بتغييرها لاحقًا إذا أردت التحقق من الملف
+# تم تغيير momo.py إلى momo
+source=("momo")
+sha256sums=('SKIP') 
 
 package() {
-    # تثبيت البرنامج في /usr/local/bin
-    install -Dm755 "${srcdir}/momo.py" "${pkgdir}/usr/local/bin/momo"
-
-    # إنشاء مجلد Logs داخل المنزل
-    mkdir -p "${pkgdir}/home/${USER}/.momo/logs"
+    # تثبيت الملف التنفيذي في /usr/local/bin باسم "momo"
+    install -Dm755 "${srcdir}/momo" "${pkgdir}/usr/local/bin/momo"
+    
+    # تم حذف سطر mkdir -p الخاص بالمنزل لضمان التوافق.
 }
