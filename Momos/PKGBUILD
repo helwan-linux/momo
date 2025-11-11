@@ -1,0 +1,16 @@
+# Maintainer: Saeed Badrelden
+pkgname=momo
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Momo - Helwan Linux Diagnostics (Ultimate Full Version)"
+arch=('x86_64')
+url="https://github.com/helwan-linux/momo"
+license=('GPL')
+depends=('python' 'python-pip' 'curses' 'smartmontools' 'hdparm' 'nvme-cli' 'stress-ng' 'memtester' 'sysbench' 'fio' 'sensors' 'speedtest-cli' 'iperf3' 'glmark2' 'glxinfo')
+makedepends=('git')
+source=("momo.py")
+sha256sums=('SKIP')  # يمكنك حساب SHA256 الصحيح بعد التنزيل
+
+package() {
+    install -Dm755 "${srcdir}/momo.py" "$pkgdir/usr/bin/momo"
+}
