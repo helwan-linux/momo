@@ -1,4 +1,4 @@
-# Maintainer: Saeed Badrelden <saeed@example.com>
+# Maintainer: Saeed Badrelden <helwanlinux@gmail.com.com>
 pkgname=momo
 pkgver=1.0.0
 pkgrel=1
@@ -7,13 +7,12 @@ arch=('x86_64')
 url="https://github.com/helwan-linux/momo"
 license=('GPL')
 depends=('python' 'python-curses' 'lm_sensors' 'smartmontools' 'hdparm' 'nvme-cli' 'stress-ng' 'memtester' 'sysbench')
-# تم تغيير momo.py إلى momo
+# المصدر هو "momo" (اسم ملف الكود التنفيذي).
 source=("momo")
+# هام جداً: يجب حساب التجزئة (Hash) الحقيقي لملف الكود momo واستبدال 'SKIP' به
 sha256sums=('SKIP') 
 
 package() {
-    # تثبيت الملف التنفيذي في /usr/local/bin باسم "momo"
-    install -Dm755 "${srcdir}/momo" "${pkgdir}/usr/local/bin/momo"
-    
-    # تم حذف سطر mkdir -p الخاص بالمنزل لضمان التوافق.
+    # هذا هو التعديل الهام: التثبيت في المسار القياسي لحزم Arch وهو /usr/bin
+    install -Dm755 "${srcdir}/momo" "${pkgdir}/usr/bin/momo"
 }
