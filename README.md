@@ -156,8 +156,11 @@ momo/
 ## 🪥 Credits
 
 **Developed by:** Saeed Badrelden
+
 **Project:** Helwan Linux
+
 **Website:** [(https://helwan-linux.github.io/helwanlinux/index.html)]([https://helwanlinux.org](https://helwan-linux.github.io/helwanlinux/index.html)) *(placeholder link)*
+
 
 > © 2025 Helwan Linux. Proudly made in Egypt 🇪🇬
 
