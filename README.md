@@ -159,7 +159,7 @@ momo/
 
 **Project:** Helwan Linux
 
-**Website:** [(https://helwan-linux.github.io/helwanlinux/index.html)]([https://helwanlinux.org](https://helwan-linux.github.io/helwanlinux/index.html)) *(placeholder link)*
+**Website:** [(https://helwan-linux.github.io/helwanlinux/index.html)]([https://helwan-linux.github.io/helwanlinux/index.html])
 
 
 > © 2025 Helwan Linux. Proudly made in Egypt 🇪🇬
