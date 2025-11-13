@@ -6,8 +6,7 @@ pkgdesc="Momo - Helwan Linux Diagnostics Tool (TUI + Streaming + Dynamic Disks)"
 arch=('x86_64')
 url="https://github.com/helwan-linux/momo"
 license=('GPL')
-depends=('python' 'python-curses' 'lm_sensors' 'smartmontools' 'hdparm' 'nvme-cli' 'stress-ng' 'memtester' 'sysbench')
-
+depends=('python' 'lm_sensors' 'smartmontools' 'hdparm' 'nvme-cli' 'stress-ng' 'memtester' 'sysbench' 'fio' 'iperf3' 'mtr')
 # 💡 التعديل 1: استخدام صيغة Git لسحب الكود مباشرة من المستودع
 # 'git+' تخبر makepkg بأن هذا الرابط هو مستودع Git يجب استنساخه
 source=("${pkgname}::git+${url}.git")
