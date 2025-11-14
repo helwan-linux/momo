@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-Momo - Helwan Linux Diagnostics Tool (TUI Stable Version with Curses)
-Author: Saeed Badrelden (Based on original code)
+Momo - Helwan Linux Diagnostics Tool (TUI Stable Version with Curses and Persistent Config)
+Author: Saeed Badrelden
 
-NOTE: This version is robust and features interactive scrolling and safe test termination,
-making it superior to the basic CLI version (momo10.py).
+DEEP DIAGNOSTICS ENHANCEMENTS (Addressing previous shortcomings):
+- Deep Disk Test: Added 'Disk IOPS (Fio Test)' to measure random I/O performance.
+- Deep Network Test: Added 'Network Bandwidth (iperf3)' and 'Network Path Quality (mtr)'.
+- Endurance Test: Increased Memtester runs and added 'RAM Endurance Test (Long)'.
+- Fully utilizes persistent configuration for all stress/endurance durations.
+
+MODIFICATION FOR SCROLLING:
+- Added self.scroll_offset to MomoApp to handle menu scrolling.
+- Modified draw_menu and run_menu to support scrolling for long menus.
 """
 
 import curses
@@ -14,103 +21,246 @@ from pathlib import Path
 from datetime import datetime
 import platform
 import sys
-import time # Added for stable UI drawing
+import time
+import os
+import json
+import curses.ascii # For handling input cleanup
 
 # --------------------------- Configuration ---------------------------
+# Note: For Deep Diagnostics (fio, iperf3, mtr), these tools must be installed on the system.
 TESTS = [
     ("RAM Usage", "free -h", "free"),
     ("RAM Details", "cat /proc/meminfo", "cat"),
-    ("RAM Stress Test (30s)", "stress-ng --vm 2 --vm-bytes 75% --cpu 2 --timeout 30s", "stress-ng"),
-    ("Memtester 512M", "memtester 512M 1", "memtester"),
+    ("RAM Stress Test (Short)", "stress-ng --vm 2 --vm-bytes 75% --cpu 2 --timeout {duration}s", "stress-ng"),
+    ("RAM Endurance Test (Long)", "stress-ng --vm 4 --vm-bytes 80% --timeout {duration}s --metrics-brief", "stress-ng"), # Long endurance
+    ("Memtester 512M (x5)", "memtester 512M 5", "memtester"), # Increased runs to 5
     ("Memory Speed", "sysbench memory --memory-block-size=1M --memory-total-size=512M run", "sysbench"),
     ("Swap Usage", "swapon --show", "swapon"),
     ("CPU Info", "lscpu", "lscpu"),
-    ("CPU Stress Test (20s)", "stress-ng --cpu 2 --timeout 20s", "stress-ng"),
+    ("CPU Stress Test", "stress-ng --cpu 2 --timeout {duration}s", "stress-ng"),
     ("Smart Status", "smartctl -a /dev/sda", "smartctl"),
-    ("Disk Speed", "hdparm -tT /dev/sda", "hdparm"),
+    # New Deep Disk Test: fio for random IOPS/Latency
+    ("Disk IOPS (Fio Test)", "fio --name=rand_rw_test --ioengine=libaio --iodepth=16 --rw=randrw --bs=4k --direct=1 --size=256M --numjobs=1 --runtime=10 --group_reporting --filename=/dev/{disk}", "fio"),
     ("Disk Usage", "df -h", "df"),
     ("Sensors", "sensors", "sensors"),
-    ("Ping Test", "ping -c 2 google.com", "ping"),
+    ("Network Ping (Basic)", "ping -c 5 google.com", "ping"),
+    # New Deep Network Tests
+    ("Network Bandwidth (iperf3)", "iperf3 -c speedtest.do.co -t 10", "iperf3"), # Uses Digital Ocean speed test server (requires internet)
+    ("Network Path Quality (mtr)", "mtr -c 10 google.com", "mtr"), # Measures packet loss and latency across path
 ]
 
+# NVMe test requires sudo and nvme-cli
+TESTS.append(
+    ("NVMe Smart Info", "sudo nvme smart-log {device}", "nvme")
+)
+
 LOG_DIR = Path.home() / ".momo" / "logs"
-DISK_TESTS = ["Smart Status", "Disk Speed"]
+CONFIG_FILE = Path.home() / ".momo" / "config.json"
+DISK_TESTS = ["Smart Status", "Disk IOPS (Fio Test)"]
+NVME_TESTS = ["NVme Smart Info"]
+STRESS_TESTS = {
+    "RAM Stress Test (Short)": 30, # Default duration in seconds
+    "RAM Endurance Test (Long)": 3600, # Default 1 hour (3600s)
+    "CPU Stress Test": 20  # Default duration in seconds
+}
+
+def load_config():
+    """Loads stress test durations from config file, or uses defaults."""
+    global STRESS_TESTS
+    if CONFIG_FILE.exists():
+        try:
+            with CONFIG_FILE.open("r") as f:
+                loaded_config = json.load(f)
+                for key in STRESS_TESTS:
+                    if key in loaded_config and isinstance(loaded_config[key], int):
+                        STRESS_TESTS[key] = loaded_config[key]
+        except Exception:
+            pass
+
+def save_config():
+    """Saves current stress test durations to config file."""
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with CONFIG_FILE.open("w") as f:
+            json.dump(STRESS_TESTS, f, indent=4)
+    except Exception:
+        pass
+
+# Load configuration immediately on script startup
+load_config()
+
 
 # --------------------------- Helper Functions --------------------------
 
 def check_tool_available(tool):
+    """Checks if a command-line tool is installed."""
+    if tool in ["cat", "free", "swapon", "df", "ping"]:
+        return True
     return shutil.which(tool) is not None
 
 def get_disks():
+    """Fetches list of available non-NVMe disk devices (e.g., sda, sdb)."""
     if platform.system() != 'Linux':
         return []
-    # Find all major disk devices (e.g., sda, sdb, nvme0n1)
-    result = subprocess.run("lsblk -ndo NAME", shell=True, capture_output=True, text=True)
-    if result.returncode == 0:
-        # Filter out loop devices and temporary devices
-        disks = [d.strip() for d in result.stdout.splitlines() if not d.strip().startswith('loop') and d.strip()]
-        return disks
+    try:
+        result = subprocess.run("lsblk -ndo NAME,TYPE", shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            disks = []
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].strip() == 'disk' and not parts[0].startswith('loop') and not parts[0].startswith('nvme'):
+                    disks.append(parts[0].strip())
+            return disks
+    except Exception:
+        return []
+    return []
+
+def get_nvme_devices():
+    """Fetches list of available NVMe devices (e.g., /dev/nvme0n1)."""
+    if platform.system() != 'Linux':
+        return []
+    try:
+        result = subprocess.run("ls /dev/nvme*n* 2>/dev/null", shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            devices = [d.strip() for d in result.stdout.splitlines() if os.path.exists(d.strip())]
+            return devices
+    except Exception:
+        return []
     return []
 
 def select_disk(stdscr):
+    """Interactive TUI for selecting a SATA/HDD disk to test."""
     disks = get_disks()
     if not disks:
-        show_message(stdscr, "No disks found for testing.")
+        show_message(stdscr, "No SATA/HDD disks found for testing.")
         return None
 
     stdscr.clear()
-    stdscr.addstr(1, 2, "Select Disk to Test:", curses.A_BOLD)
+    stdscr.addstr(1, 2, "Select Disk to Test (SATA/HDD):", curses.A_BOLD)
     for i, disk in enumerate(disks):
         stdscr.addstr(3 + i, 2, f"{i+1}. /dev/{disk}")
     stdscr.addstr(len(disks) + 4, 2, "Enter number or 'c' to Cancel:")
     stdscr.refresh()
-
+    
     while True:
         try:
             choice = stdscr.getch()
-            if choice == ord('c'):
+            if choice in (ord('c'), ord('C')):
                 return None
             
-            choice = int(chr(choice)) - 1
-            if 0 <= choice < len(disks):
-                return disks[choice]
-        except (ValueError, IndexError):
-            continue
+            if 48 <= choice <= 57: # ASCII for 0-9
+                choice = int(chr(choice)) - 1
+                if 0 <= choice < len(disks):
+                    return disks[choice]
+            
         except Exception:
-            # Handle potential curses/getch errors
             continue
 
-def run_command_stream(cmd, stop_flag=None):
+def select_nvme(stdscr):
+    """Interactive TUI for selecting an NVMe device to test."""
+    devices = get_nvme_devices()
+    if not devices:
+        show_message(stdscr, "No NVMe devices found.")
+        return None
+        
+    stdscr.clear()
+    stdscr.addstr(1, 2, "Select NVMe Device to Test:", curses.A_BOLD)
+    for i, dev in enumerate(devices):
+        stdscr.addstr(3 + i, 2, f"{i+1}. {dev}")
+    stdscr.addstr(len(devices) + 4, 2, "Enter number or 'c' to Cancel:")
+    stdscr.refresh()
+    
+    while True:
+        try:
+            choice = stdscr.getch()
+            if choice in (ord('c'), ord('C')):
+                return None
+            
+            if 48 <= choice <= 57: # ASCII for 0-9
+                choice = int(chr(choice)) - 1
+                if 0 <= choice < len(devices):
+                    return devices[choice]
+            
+        except Exception:
+            continue
+
+def get_duration_input(stdscr, test_name, default_duration):
+    """TUI prompt to get user input for stress test duration."""
+    stdscr.clear()
+    stdscr.addstr(2, 2, f"{test_name} is about to run a stress test.", curses.A_BOLD)
+    stdscr.addstr(3, 2, f"Current duration is {default_duration} seconds.")
+    stdscr.addstr(5, 2, "Enter new duration in seconds (or press Enter for current): ")
+    
+    curses.echo()
+    duration_str = ""
+    input_y, input_x = 5, 66
+    
+    def update_input_display():
+        stdscr.move(input_y, input_x)
+        stdscr.clrtoeol()
+        stdscr.addstr(input_y, input_x, duration_str)
+        stdscr.refresh()
+
+    update_input_display()
+
     try:
-        # Use shell=True for complex commands with pipes/redirection
-        process = subprocess.Popen(
-            cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-        )
+        while True:
+            c = stdscr.getch()
+            if c in (curses.KEY_ENTER, 10, 13):
+                break
+            elif c in (curses.KEY_BACKSPACE, 127, curses.KEY_DC):
+                duration_str = duration_str[:-1]
+                update_input_display()
+            elif 48 <= c <= 57 and len(duration_str) < 5:
+                duration_str += chr(c)
+                update_input_display()
+            elif c == curses.ascii.ctrl('c'):
+                raise KeyboardInterrupt
+    except Exception:
+        pass
+    
+    curses.noecho()
+    
+    if not duration_str.strip():
+        return default_duration
+    
+    try:
+        duration = int(duration_str.strip())
+        return max(1, duration)
+    except ValueError:
+        return default_duration
+
+
+def run_command_stream(cmd, stop_flag=None):
+    """Runs a command and streams output line by line."""
+    try:
+        # Check for sudo requirement heuristics (simple check)
+        if "sudo" in cmd and os.geteuid() != 0:
+             yield "WARNING: This command might require root privileges (sudo)."
+        
+        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         for line in process.stdout:
-            # yield the line instantly
             yield line.rstrip()
             if stop_flag and stop_flag["stop"]:
-                # Send SIGTERM to stop the subprocess safely
                 process.terminate()
                 process.wait()
                 yield "\n--- Test Terminated by User ---"
                 break
-        
-        # Ensure the process is fully closed
         if process.poll() is None:
             process.wait()
-        
     except FileNotFoundError:
         yield f"ERROR: Command not found or tool not installed. Command: {cmd}"
     except Exception as e:
         yield f"ERROR: An exception occurred: {e}"
 
 def write_log_stream(test_name, lines):
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    sanitized_name = test_name.replace(" ", "_").replace("/", "_")
-    log_file = LOG_DIR / f"{sanitized_name}_{timestamp}.log"
+    """Writes the streamed output to a log file."""
     try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        sanitized_name = test_name.replace(" ", "_").replace("/", "_").replace("(", "").replace(")", "")
+        log_file = LOG_DIR / f"{sanitized_name}_{timestamp}.log"
+        
         with log_file.open("w", encoding="utf-8") as f:
             f.write(f"--- Momo Diagnostics Log: {test_name} ---\n")
             f.write(f"Date: {timestamp}\n")
@@ -123,193 +273,381 @@ def write_log_stream(test_name, lines):
         return f"Failed to write log: {e}"
 
 def show_message(stdscr, message):
+    """Displays a modal-like message box and waits for user input."""
     stdscr.clear()
     stdscr.border(0)
     lines = message.split('\n')
+    
+    max_y, max_x = stdscr.getmaxyx()
+    start_y = max(2, (max_y - (len(lines) + 5)) // 2) 
+
     for i, line in enumerate(lines):
         try:
-            stdscr.addstr(2 + i, 2, line)
+            x_pos = max(2, (max_x - len(line)) // 2)
+            stdscr.addstr(start_y + i, x_pos, line[:max_x-4])
         except curses.error:
-            pass # Ignore if message exceeds window size
-    stdscr.addstr(len(lines) + 4, 2, "Press any key to continue...")
+            pass
+    
+    prompt_text = "Press any key to continue..."
+    prompt_x = max(2, (max_x - len(prompt_text)) // 2)
+    stdscr.addstr(start_y + len(lines) + 2, prompt_x, prompt_text, curses.A_BOLD)
+    
     stdscr.refresh()
     stdscr.getch()
 
-# --------------------------- Main Application Class --------------------------
+def show_welcome(stdscr):
+    """Displays an animated welcome screen."""
+    stdscr.clear()
+    stdscr.border(0)
+    curses.curs_set(0)
 
+    logo = [
+        r"   Helwan Linux Momo    "
+    ]
+
+    features = [
+        "",
+        "Deep Diagnostics Version (IOPS, Endurance, Bandwidth)!",
+        "",
+        "Key Features:",
+        # 💡 Correction: Added the crucial Sudo warning in English.
+        "Recommended to run with sudo (sudo momo) for Disk and NVMe tests.",
+        # -----------------------------------------------------------------------------------------------------
+        "  • Deep Storage Check (fio IOPS & SMART)",
+        "  • Deep Network Check (iperf3 & mtr)",
+        "  • Extended Endurance Tests (Configurable Long Stress)",
+        "  • Auto Logs & Persistent Configurations",
+        "",
+        "Press any key to start..."
+    ]
+
+    lines = logo + [""] + features
+
+    max_y, max_x = stdscr.getmaxyx()
+    start_y = max(2, (max_y - len(lines)) // 2)
+
+    for i, line in enumerate(lines):
+        try:
+            x = max(2, (max_x - len(line)) // 2)
+            style = curses.A_BOLD if i < len(logo) else curses.A_NORMAL
+            stdscr.addstr(start_y + i, x, line, style)
+            stdscr.refresh()
+            time.sleep(0.07)
+        except curses.error:
+            pass
+
+    time.sleep(0.3)
+    stdscr.nodelay(False)
+    stdscr.getch()
+    stdscr.clear()
+    stdscr.refresh()
+
+# --------------------------- Main Application Class --------------------------
 class MomoApp:
     def __init__(self, stdscr):
         self.stdscr = stdscr
-        curses.curs_set(0) # Hide cursor
+        curses.curs_set(0)
         self.height, self.width = stdscr.getmaxyx()
         self.current_selection = 0
-        
-        # Color initialization (for better visibility)
+        self.scroll_offset = 0  # <--- NEW: Tracks the top line displayed for scrolling
         curses.start_color()
-        curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE) # Highlight color
+        curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
 
     def draw_menu(self):
+        """Draws the main menu with scrolling support."""
         self.stdscr.clear()
         self.stdscr.border(0)
-        self.stdscr.addstr(1, 2, "Momo - Helwan Linux Diagnostics", curses.A_BOLD)
-        self.stdscr.addstr(self.height - 2, 2, "Use ↑↓ to navigate, Enter to select, 'A' for All, 'Q' to quit.", curses.A_DIM)
-
-        # Draw the actual menu items
+        max_y, max_x = self.stdscr.getmaxyx()
+        
+        self.stdscr.addstr(1, 2, "Momo - Helwan Linux Deep Diagnostics", curses.A_BOLD)
+        
+        # Aggregate all menu items
         menu_items = [name for name, _, _ in TESTS]
+        menu_items.append("Configure Stress Test Durations")
         menu_items.append("Run All Tests (Full Diagnosis)")
         menu_items.append("Exit Momo")
 
-        for i, item in enumerate(menu_items):
+        start_y = 3
+        
+        # Calculate available lines for items (reserving space for header and footer)
+        display_lines = max_y - start_y - 3 
+        
+        # 💡 Scrolling Logic: Adjust offset to keep selection visible
+        if self.current_selection < self.scroll_offset:
+            self.scroll_offset = self.current_selection
+        if self.current_selection >= self.scroll_offset + display_lines:
+            self.scroll_offset = self.current_selection - display_lines + 1
+
+        # Draw only the visible portion of the menu
+        for i in range(display_lines):
+            menu_index = self.scroll_offset + i
+            if menu_index >= len(menu_items):
+                break
+                
+            item = menu_items[menu_index]
             x = 4
-            y = 3 + i
+            y = start_y + i
             style = curses.A_NORMAL
             
-            # Check for tool availability and dim if missing
-            if i < len(TESTS) and not check_tool_available(TESTS[i][2]):
-                item_display = f"[MISSING] {item}"
-                style |= curses.A_DIM
-            else:
-                item_display = item
-                
-            # Highlight the current selection
-            if i == self.current_selection:
-                style |= curses.color_pair(1)
+            item_display = item
+            
+            # Check for missing tools
+            if menu_index < len(TESTS):
+                tool = TESTS[menu_index][2]
+                if not check_tool_available(tool):
+                    item_display = f"[MISSING] {item}"
+                    style |= curses.A_DIM
+            
+            # Display duration for stress tests
+            if item in STRESS_TESTS:
+                item_display = f"{item} ({STRESS_TESTS[item]}s)"
+
+            # Apply selection highlighting
+            if menu_index == self.current_selection:
+                style |= curses.color_pair(1) | curses.A_BOLD
 
             try:
-                self.stdscr.addstr(y, x, item_display, style)
+                self.stdscr.addstr(y, x, item_display[:max_x-x-2], style)
             except curses.error:
-                pass # Ignore if screen is too small
-
+                pass
+                
+        self.stdscr.addstr(max_y - 2, 2, "Use ↑↓ to navigate/scroll, Enter to select, 'A' for All, 'Q' to quit.", curses.A_DIM)
         self.stdscr.refresh()
-        
+
     def run_menu(self):
+        """Handles menu navigation and user input, including scrolling."""
         while True:
             self.draw_menu()
-            
-            # Use nodelay for the main menu loop to ensure quick response
             self.stdscr.nodelay(False)
             c = self.stdscr.getch()
+            
+            num_tests = len(TESTS)
+            configure_index = num_tests
+            run_all_index = num_tests + 1
+            exit_index = num_tests + 2
+            menu_items_count = exit_index + 1
+            
+            # Scrolling logic setup
+            max_y, max_x = self.stdscr.getmaxyx()
+            start_y = 3
+            display_lines = max_y - start_y - 3
 
             if c == curses.KEY_UP:
                 self.current_selection = max(0, self.current_selection - 1)
+                # Scroll up if selection is out of view
+                if self.current_selection < self.scroll_offset:
+                    self.scroll_offset = self.current_selection
             elif c == curses.KEY_DOWN:
-                self.current_selection = min(len(TESTS) + 1, self.current_selection + 1)
+                self.current_selection = min(menu_items_count - 1, self.current_selection + 1)
+                # Scroll down if selection is out of view
+                if self.current_selection >= self.scroll_offset + display_lines:
+                    self.scroll_offset = self.current_selection - display_lines + 1
             elif c in (curses.KEY_ENTER, 10, 13):
-                # Execute selected action
-                if self.current_selection < len(TESTS):
-                    self.run_test(self.current_selection)
-                elif self.current_selection == len(TESTS):
+                if self.current_selection < num_tests:
+                    self.run_test(self.current_selection, use_default_settings=False)
+                elif self.current_selection == configure_index:
+                    self.configure_stress_durations()
+                elif self.current_selection == run_all_index:
                     self.run_all()
-                elif self.current_selection == len(TESTS) + 1:
+                elif self.current_selection == exit_index:
                     break
             elif c in (ord('a'), ord('A')):
                 self.run_all()
             elif c in (ord('q'), ord('Q')):
                 break
             
-            # Mandatory sleep for stable UI refresh, reducing flicker
-            time.sleep(0.01) 
+            if c == curses.KEY_RESIZE:
+                self.height, self.width = self.stdscr.getmaxyx()
+                # Re-calculate scroll offset to stay within bounds after resize
+                self.scroll_offset = min(self.scroll_offset, max(0, menu_items_count - display_lines))
 
+            time.sleep(0.01)
 
-    def run_test(self, index):
+    def configure_stress_durations(self):
+        """Allows user to set custom durations for stress tests and saves them."""
+        changed = False
+        for test_name, current_duration in STRESS_TESTS.items():
+            new_duration = get_duration_input(self.stdscr, test_name, current_duration)
+            if new_duration != current_duration:
+                STRESS_TESTS[test_name] = new_duration
+                changed = True
+            
+        if changed:
+            save_config()
+            show_message(self.stdscr, "Stress test durations updated and saved.")
+        else:
+            show_message(self.stdscr, "No changes made to stress test durations.")
+
+    def run_test(self, index, use_default_settings=False):
+        """Executes a single test, handling TUI output streaming and logging."""
         test_name, cmd, tool = TESTS[index]
         
         if not check_tool_available(tool):
-            show_message(self.stdscr, f"Error: Required tool '{tool}' is not installed or not in PATH.\nInstall it via your package manager (e.g., 'sudo pacman -S {tool}').")
-            return
+            message = f"Error: Required tool '{tool}' is not installed or not in PATH.\nInstall it via your package manager (e.g., 'sudo apt install {tool}')."
+            if use_default_settings:
+                return f"Skipped: {test_name}. Missing tool '{tool}'."
+            else:
+                show_message(self.stdscr, message)
+                return
 
-        # Handle Disk Tests
-        if test_name in DISK_TESTS:
-            disk = select_disk(self.stdscr)
-            if disk is None:
-                return # User cancelled
-            cmd = cmd.replace("/dev/sda", f"/dev/{disk}")
+        disk_or_nvme = None
+        
+        # 1. Disk Selection Logic
+        if test_name in DISK_TESTS or test_name in NVME_TESTS:
+            is_nvme = test_name in NVME_TESTS
+            devices = get_nvme_devices() if is_nvme else get_disks()
+            
+            if not devices:
+                message = f"Skipping {test_name}: No {'NVMe' if is_nvme else 'SATA/HDD'} devices found."
+                if use_default_settings: return message
+                else:
+                    show_message(self.stdscr, message)
+                    return
+            
+            if use_default_settings:
+                disk_or_nvme = devices[0]
+            else:
+                disk_or_nvme = select_nvme(self.stdscr) if is_nvme else select_disk(self.stdscr)
+            
+            if disk_or_nvme is None and not use_default_settings: return # Cancelled
 
-        # Display area setup
+            # 2. Command Formatting for Disk/NVMe
+            if is_nvme:
+                 # NVMe Smart Info command uses full path and {device} placeholder
+                cmd = cmd.format(device=disk_or_nvme)
+            else:
+                # Fio uses device name {disk}, Smart Status uses full path and /dev/sda placeholder
+                if test_name == "Disk IOPS (Fio Test)":
+                    cmd = cmd.format(disk=disk_or_nvme)
+                elif test_name == "Smart Status":
+                    cmd = cmd.replace("/dev/sda", f"/dev/{disk_or_nvme}")
+        
+        # 3. Duration Formatting
+        duration = None
+        if test_name in STRESS_TESTS:
+            default_duration = STRESS_TESTS[test_name]
+            if use_default_settings:
+                duration = default_duration
+            else:
+                duration = get_duration_input(self.stdscr, test_name, default_duration)
+            cmd = cmd.format(duration=duration)
+            
+        # Prepare TUI screen for streaming output
         self.stdscr.clear()
         self.stdscr.border(0)
-        self.stdscr.addstr(1, 2, f"Running Test: {test_name} (Press 'Q' or 'S' to STOP)", curses.A_BOLD)
-        self.stdscr.addstr(self.height - 2, 2, "Use ↑↓ to scroll. Log will be saved automatically.", curses.A_DIM)
+        max_y, max_x = self.stdscr.getmaxyx()
+        
+        info_line = f"Running Test: {test_name}"
+        if duration:
+            info_line += f" ({duration}s)"
+        if disk_or_nvme and test_name in DISK_TESTS:
+            info_line += f" on /dev/{disk_or_nvme}"
+        if disk_or_nvme and test_name in NVME_TESTS:
+            info_line += f" on {disk_or_nvme}"
+
+        self.stdscr.addstr(1, 2, f"{info_line} (Press 'Q' or 'S' to STOP)", curses.A_BOLD)
+        self.stdscr.addstr(max_y - 2, 2, "Use ↑↓ to scroll. Log will be saved automatically.", curses.A_DIM)
         self.stdscr.refresh()
 
+        # Initialize Pad for output streaming
         stop_flag = {"stop": False}
         lines = []
-        pad_height = 5000 # Max lines buffer
+        pad_height = 5000 
+        pad = curses.newpad(pad_height, max_x - 4) 
+        offset = 0 
+        idx_line = 0 
         
-        # Create a new pad for the streaming output
-        pad = curses.newpad(pad_height, self.width-4)
-        offset = 0
-        idx_line = 0
-        
-        # Set nodelay=True inside the run loop for non-blocking input check
-        self.stdscr.nodelay(True) 
+        self.stdscr.nodelay(True)
 
         for line in run_command_stream(cmd, stop_flag):
             if idx_line >= pad_height:
-                # Stop if pad buffer is full
                 lines.append("--- PAD BUFFER FULL. Output truncated. ---")
-                break 
-                
+                break
+            
             lines.append(line)
             try:
-                # Add line to the pad
-                pad.addstr(idx_line, 0, line[:self.width-6])
+                pad.addstr(idx_line, 0, line[:max_x - 6]) 
             except curses.error:
-                pass 
+                pass
                 
             idx_line += 1
             
-            # Auto-scroll down if not manually scrolling
-            if idx_line > (self.height - 6) and offset < idx_line - (self.height - 6):
-                 offset = idx_line - (self.height - 6)
-            
-            # Refresh pad to show current output
-            # (offset, 0) - top-left corner of the pad to display
-            # (3, 2, self.height-4, self.width-2) - screen area where pad is shown
-            pad.refresh(offset, 0, 3, 2, self.height-4, self.width-2)
-            
-            # Check for input to scroll or stop (non-blocking)
+            # Auto-scroll logic (follows the bottom of the content)
+            if idx_line > (max_y - 6) and offset < idx_line - (max_y - 6):
+                 offset = idx_line - (max_y - 6)
+
             c = self.stdscr.getch()
             if c == curses.KEY_UP:
                 offset = max(0, offset-1)
             elif c == curses.KEY_DOWN:
-                offset += 1
-            elif c in (ord('s'), ord('q')):
+                max_offset = idx_line - max(0, max_y - 6) 
+                offset = min(max_offset, offset + 1)
+            elif c in (ord('s'), ord('q'), ord('S'), ord('Q')):
                 stop_flag["stop"] = True
-                # Break here to allow run_command_stream to handle termination
-                break 
-                
-            # Sleep slightly to prevent CPU overload during streaming
-            time.sleep(0.005) 
+                break
+            
+            # Ensure offset doesn't exceed available lines
+            max_scroll_line = idx_line - max(0, max_y - 6)
+            offset = max(0, min(offset, max_scroll_line))
+            
+            pad.refresh(offset, 0, 3, 2, max_y-4, max_x-2)
+            time.sleep(0.005)
 
-        # Return to blocking input after test completion
-        self.stdscr.nodelay(False)
+        self.stdscr.nodelay(False) 
         
-        # Final refresh for the last bit of output
-        pad.refresh(offset, 0, 3, 2, self.height-4, self.width-2)
+        # Final refresh to show the complete output or termination message
+        max_offset = idx_line - max(0, max_y - 6)
+        offset = min(max_offset, offset)
+        pad.refresh(offset, 0, 3, 2, max_y-4, max_x-2)
         
         logpath = write_log_stream(test_name, lines)
-        show_message(self.stdscr, f"Finished: {test_name}\nLog: {logpath}")
+        
+        if use_default_settings:
+            return f"Completed: {test_name}. Log: {logpath}"
+        else:
+            show_message(self.stdscr, f"Finished: {test_name}\nLog: {logpath}")
+            return 
 
     def run_all(self):
+        """Runs all tests using default/configured settings and durations, non-interactively."""
+        summary_message = "Running All Tests...\nStress tests will use configured durations.\nDisk tests will automatically target the first detected disk/NVMe."
+        show_message(self.stdscr, summary_message)
+        
+        all_logs = []
+        
         for i in range(len(TESTS)):
-            # This loop calls run_test and waits for each one to finish
-            self.run_test(i)
-        show_message(self.stdscr, f"All tests completed.\nLogs saved in: {LOG_DIR}")
+            test_name = TESTS[i][0]
+            try:
+                # Clear and display progress message before running each test
+                self.stdscr.clear()
+                self.stdscr.border(0)
+                self.stdscr.addstr(2, 2, f"Running All: Executing {test_name}...", curses.A_BOLD)
+                self.stdscr.addstr(4, 2, f"Progress: {i+1} of {len(TESTS)} tests.", curses.A_NORMAL)
+                self.stdscr.refresh()
+                
+                result = self.run_test(i, use_default_settings=True)
+                if isinstance(result, str):
+                    all_logs.append(result)
+            except Exception as e:
+                error_msg = f"Critical Error during Run All on test {test_name}: {e}"
+                all_logs.append(error_msg)
+                continue  
+
+        final_summary = "All tests completed.\n\nSummary:\n" + "\n".join(all_logs) + f"\n\nFull logs saved in: {LOG_DIR}"
+        show_message(self.stdscr, final_summary)
 
 # --------------------------- Entry Point ---------------------------\
 def main(stdscr):
     if platform.system() != "Linux":
         show_message(stdscr, "Momo runs only on Linux. Exiting.")
         return
-
     try:
+        show_welcome(stdscr)
         app = MomoApp(stdscr)
         app.run_menu()
     except Exception as e:
-        # Emergency exit/error handling
         stdscr.clear()
-        stdscr.addstr(1, 1, "FATAL ERROR OCCURRED:")
+        stdscr.addstr(1, 1, "FATAL ERROR OCCURRED (Momo is crashing):")
         stdscr.addstr(2, 1, str(e))
         stdscr.addstr(4, 1, "Press any key to exit.")
         stdscr.refresh()
@@ -319,6 +657,6 @@ if __name__ == "__main__":
     try:
         curses.wrapper(main)
     except curses.error as e:
-        print(f"A curses error occurred. Try running the program in a standard terminal. Error: {e}")
+        print(f"A curses error occurred. Ensure your terminal window is large enough and try running the program in a standard terminal. Error: {e}")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
