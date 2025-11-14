@@ -1,7 +1,7 @@
 # Maintainer: Saeed Badrelden <helwanlinux@gmail.com.com>
 pkgname=momo
 pkgver=1.0.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Momo - Helwan Linux Diagnostics Tool (TUI + Streaming + Dynamic Disks)"
 arch=('x86_64')
 url="https://github.com/helwan-linux/momo"
